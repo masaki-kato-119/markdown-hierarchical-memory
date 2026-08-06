@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mdmem": {
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-m", "mdmem.server"],
+      "env": {
+        "MDMEM_ROOT": "${workspaceFolder}/memory"
+      }
+    }
+  }
+}

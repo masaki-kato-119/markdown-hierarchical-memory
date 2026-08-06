@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Contains an absolute local path (command/MDMEM_ROOT) -- personal to each
+# machine. Copy .mcp.json.example and fill in the real path instead.
+.mcp.json
