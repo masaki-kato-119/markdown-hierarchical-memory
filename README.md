@@ -1,4 +1,4 @@
-# mdmem
+# markdown-hierarchical-memory
 
 [markdown-hierarchical-memory-spec.md](markdown-hierarchical-memory-spec.md) v1 の実装。
 
