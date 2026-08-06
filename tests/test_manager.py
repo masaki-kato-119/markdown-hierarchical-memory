@@ -206,6 +206,40 @@ def test_split_file_creates_bidirectional_link_and_removes_section(root):
     assert "a_detail" in source_mf.body  # backlink present on source side too
 
 
+def test_split_file_rolls_back_on_failure_after_create(root, monkeypatch):
+    # Regression: create_file -> source rewrite -> link_files had no rollback.
+    # A failure in link_files previously left an orphaned, unlinked new file
+    # (and, if the section had already been removed from the source, no copy
+    # of that content left anywhere). Force link_files to fail and verify the
+    # source is restored and the new file/index entry are cleaned up.
+    manager.create_file(
+        root, "a", "projects", "project",
+        "# A\n\n## Detail\nsome detail text\n\n## Other\nkeep me\n",
+        "desc a",
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated link_files failure")
+
+    monkeypatch.setattr(manager, "link_files", boom)
+
+    with pytest.raises(RuntimeError):
+        manager.split_file(
+            root, source_id="a", new_id="a_detail", new_dir="projects", new_type="project",
+            new_description="split-out detail", section_to_extract="Detail",
+        )
+
+    source_mf = manager.require_by_id(root, "a")
+    assert "## Detail" in source_mf.body
+    assert "some detail text" in source_mf.body
+    from mdmem.store import find_by_id
+
+    assert find_by_id(root, "a_detail") is None
+    from mdmem.index import read_index
+
+    assert all(e.id != "a_detail" for e in read_index(root))
+
+
 def test_summarize_and_archive_moves_file_and_keeps_index_visible(root):
     manager.create_file(root, "a", "projects", "project", "long content", "desc a")
     archived = manager.summarize_and_archive(root, "a", "short summary", "desc a (archived)")
@@ -222,6 +256,44 @@ def test_move_to_archive_preserves_content(root):
     archived = manager.move_to_archive(root, "a")
     assert archived.is_archived
     assert "keep this content" in archived.body
+
+
+def test_move_to_archive_leaves_no_file_at_original_path(root):
+    manager.create_file(root, "a", "projects", "project", "content\n", "desc a")
+    archived = manager.move_to_archive(root, "a")
+    original_path = archived.path.parent.parent / "projects" / "a.md"
+    assert not original_path.exists()
+
+    # exactly one file resolves to this id -- no transient duplicate
+    matches = [mf for mf in manager.load_all(root) if mf.id == "a"]
+    assert len(matches) == 1
+
+
+def test_summarize_and_archive_leaves_no_file_at_original_path(root):
+    manager.create_file(root, "a", "projects", "project", "long content", "desc a")
+    manager.summarize_and_archive(root, "a", "short summary", "desc a (archived)")
+    matches = [mf for mf in manager.load_all(root) if mf.id == "a"]
+    assert len(matches) == 1
+    assert matches[0].is_archived
+
+
+def test_get_and_touch_rereads_before_writing_back(root, monkeypatch):
+    # Regression: get_and_touch wrote back the body/fm captured by
+    # require_by_id's scan, so a concurrent append landing after that scan
+    # but before this function's own write got silently reverted (lost
+    # update), and since `updated` isn't advanced, optimistic locking
+    # elsewhere didn't catch it. Simulate the race by pinning require_by_id
+    # to a stale snapshot, then let a "concurrent" append land before the
+    # (now re-reading) get_and_touch writes.
+    manager.create_file(root, "a", "projects", "project", "original body", "desc")
+    stale_mf = manager.require_by_id(root, "a")
+    monkeypatch.setattr(manager, "require_by_id", lambda root, id: stale_mf)
+
+    manager.append_to_file(root, "a", "concurrent append")
+    touched = manager.get_and_touch(root, "a")
+
+    assert "concurrent append" in touched.body
+    assert touched.fm["access_count"] == 1
 
 
 def test_check_archive_candidates_respects_pinned(root):

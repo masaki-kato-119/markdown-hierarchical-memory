@@ -89,3 +89,20 @@ def mark_archived(root: Path, id: str, archived: bool = True) -> None:
             e.archived = archived
             write_index(root, entries)
             return
+    # No matching entry -- self-heal instead of silently no-op (previously
+    # this returned without writing anything, leaving the archived file
+    # permanently missing from index.md / get_index). The description is
+    # lost since index.md was the only place it lived, so fall back to `id`.
+    entries.append(IndexEntry(id=id, description=id, tags=[], archived=archived))
+    write_index(root, entries)
+
+
+def remove_entry(root: Path, id: str) -> None:
+    """Remove `id`'s entry from index.md entirely. Only used to unwind a
+    create_memory_file that must be rolled back within the same operation
+    (e.g. split_file failing partway) -- not a general delete path; spec's
+    forget model (§13) still applies to anything a caller has already seen."""
+    entries = read_index(root)
+    remaining = [e for e in entries if e.id != id]
+    if len(remaining) != len(entries):
+        write_index(root, remaining)

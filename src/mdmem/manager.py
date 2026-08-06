@@ -22,12 +22,26 @@ from .store import MemoryFile, check_version, find_by_id, load_all, load_file, r
 
 def get_and_touch(root: Path, id: str) -> MemoryFile:
     """spec §11: access_count/last_access are incremented by the retrieval flow
-    at the point a file is actually fetched (not merely surfaced in search)."""
+    at the point a file is actually fetched (not merely surfaced in search).
+
+    require_by_id's lookup scans every file under root (O(n) in store size)
+    before this function ever touches the target file, which widens the gap
+    between "the content we're about to write back" and "the content
+    currently on disk" as the store grows. Previously this wrote back the
+    body/fm captured by that scan, so a concurrent append_to_file landing in
+    that gap got silently reverted (lost update) -- and because this doesn't
+    (deliberately) advance `updated`, expected_updated-based optimistic
+    locking elsewhere didn't catch it either. Re-reading just the target file
+    immediately before writing shrinks the window to a single file's
+    read+write, which is the same order of risk as any other single
+    write_file call in this module (not a full fix -- that needs real
+    locking, see docs/improvement-plan.md)."""
     mf = require_by_id(root, id)
-    mf.fm["access_count"] = int(mf.fm.get("access_count", 0)) + 1
-    mf.fm["last_access"] = models.today_date()
-    write_file(mf.path, mf.fm, mf.body)
-    return mf
+    fresh = load_file(mf.path)
+    fresh.fm["access_count"] = int(fresh.fm.get("access_count", 0)) + 1
+    fresh.fm["last_access"] = models.today_date()
+    write_file(fresh.path, fresh.fm, fresh.body)
+    return fresh
 
 
 def create_file(
@@ -326,7 +340,7 @@ def split_file(
             raise ValidationError("either section_to_extract or extracted_content is required")
         content, remaining_body = extracted_content, source_mf.body
 
-    create_file(
+    new_mf = create_file(
         root,
         id=new_id,
         dir=new_dir,
@@ -341,10 +355,23 @@ def split_file(
         _log=False,
     )
 
-    source_mf.fm["updated"] = models.now_stamp()
-    write_file(source_mf.path, source_mf.fm, remaining_body)
-
-    _, new_mf = link_files(root, source_id, new_id, actor=actor, rationale=rationale, _log=False)
+    # From here, source_mf's file and index.md's new_id entry both exist.
+    # A failure in either remaining step previously left an orphan (new file
+    # created but not linked, and/or the section already removed from the
+    # source with nowhere left holding that content). Snapshot the source's
+    # original text so a failure can restore it, and remove the new file +
+    # its index entry, leaving no visible trace of the incomplete split.
+    original_source_text = source_mf.path.read_text(encoding="utf-8")
+    try:
+        source_mf.fm["updated"] = models.now_stamp()
+        write_file(source_mf.path, source_mf.fm, remaining_body)
+        _, new_mf = link_files(root, source_id, new_id, actor=actor, rationale=rationale, _log=False)
+    except Exception:
+        source_mf.path.write_text(original_source_text, encoding="utf-8", newline="\n")
+        if new_mf.path.exists():
+            new_mf.path.unlink()
+        index_mod.remove_entry(root, new_id)
+        raise
 
     log_mod.append(
         root,
@@ -376,9 +403,14 @@ def summarize_and_archive(
     if archive_path.exists() and archive_path != mf.path:
         raise ValidationError(f"archive destination already exists: {archive_path}")
 
-    write_file(archive_path, mf.fm, summary_content)
-    if mf.path != archive_path and mf.path.exists():
-        mf.path.unlink()
+    # Write the new content in place, then a single atomic rename into
+    # archive/ -- avoids the previous write-then-unlink window where a file
+    # with this `id` briefly existed at both paths simultaneously (a
+    # concurrent find_by_id in that window could resolve to either one).
+    write_file(mf.path, mf.fm, summary_content)
+    if mf.path != archive_path:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        mf.path.replace(archive_path)
 
     index_mod.upsert_entry(root, id, description_for_index, tags=mf.fm.get("tags", []), archived=True)
     log_mod.append(root, "summarize_and_archive", [id], rationale or f"summarized and archived {id}", actor)
@@ -401,9 +433,10 @@ def move_to_archive(
         raise ValidationError(f"archive destination already exists: {archive_path}")
 
     mf.fm["updated"] = models.now_stamp()
-    write_file(archive_path, mf.fm, mf.body)
-    if mf.path != archive_path and mf.path.exists():
-        mf.path.unlink()
+    write_file(mf.path, mf.fm, mf.body)
+    if mf.path != archive_path:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        mf.path.replace(archive_path)
 
     index_mod.mark_archived(root, id, archived=True)
     log_mod.append(root, "archive", [id], rationale or f"archived {id} (§13 forget condition)", actor)
