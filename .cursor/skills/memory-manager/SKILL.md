@@ -28,7 +28,9 @@ description: >-
 | `check_archive_candidates` / `get_change_log` | 提案・ログ |
 
 書き込み系は必ず `expected_updated`（直前の `frontmatter.updated`）を渡す。`ConflictError` なら再読込→再試行。
-`actor` は `"memory-manager"`。`rationale` に判断根拠を簡潔に書く（§10・§17）。
+`actor` は **役割のみ** `"memory-manager"`。クライアント名（`cursor` 等）は自分で名乗らない——
+サーバーが `MDMEM_ACTOR` から補い `cursor/memory-manager` と結合する。自称が8種類に分岐した原因。
+`rationale` に判断根拠を簡潔に書く（§10・§17）。
 
 ## 基本フロー（§10）
 

@@ -4,7 +4,8 @@
       "command": "<ABSOLUTE_PATH_TO_THIS_REPO>/.venv/Scripts/python.exe",
       "args": ["-m", "mdmem.server"],
       "env": {
-        "MDMEM_ROOT": "<ABSOLUTE_PATH_TO_THIS_REPO>/memory"
+        "MDMEM_ROOT": "<ABSOLUTE_PATH_TO_THIS_REPO>/memory",
+        "MDMEM_ACTOR": "claude"
       }
     }
   }

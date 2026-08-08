@@ -3,9 +3,12 @@ mis-judgments can be reviewed and manually reverted later. Logging is done by th
 mutating operations themselves, not left to the caller to remember."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .models import ARCHIVE_DIR, LOG_NAME, now_stamp
+
+_ACTOR_RE = re.compile(r"^- actor: (.*)$")
 
 _HEADER = (
     "# Manager Agent Change Log\n\n"
@@ -30,3 +33,23 @@ def append(root: Path, action: str, targets: list[str], rationale: str, actor: s
     )
     with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(entry)
+
+
+def list_actors(root: Path) -> dict[str, int]:
+    """Every `actor` value that has been written to the log, with entry counts.
+
+    `actor` is free-form like `type`, and drifted the same way once nothing made the
+    existing values visible: one real store accumulated claude / cursor / cursor-auto
+    / memory-manager for what were three agents. Unlike `type` this cannot be read
+    off the files -- actors exist only in log history -- so it is counted here.
+    """
+    path = log_path(root)
+    if not path.exists():
+        return {}
+    counts: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = _ACTOR_RE.match(line)
+        if m:
+            actor = m.group(1).strip()
+            counts[actor] = counts.get(actor, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))

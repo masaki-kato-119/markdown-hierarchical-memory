@@ -21,6 +21,30 @@ def get_root() -> Path:
     return root
 
 
+def resolve_actor(explicit: str | None) -> str:
+    """Who to record in the change log: configured client identity, plus an optional
+    role the caller names.
+
+    Every mutating tool used to default `actor` to the literal "claude", so a call
+    from any other client that didn't pass one was logged as Claude -- the log was
+    not merely inconsistent, it was wrong. And the drift the log did show (eight
+    spellings for a handful of agents) persisted despite both agent definitions
+    already instructing which value to pass, because an instruction only reaches the
+    agent that reads it, not the main session calling these tools directly.
+
+    Which client is running is not a judgment an LLM should be making: the
+    configuration knows it. MDMEM_ACTOR supplies it, the same way MDMEM_ROOT supplies
+    the root. A caller-supplied role still means something the environment cannot
+    know (`memory-manager` acting inside a session), so the two combine rather than
+    one overwriting the other -- otherwise recording the role would erase the client.
+    """
+    client = os.environ.get("MDMEM_ACTOR", "").strip()
+    role = (explicit or "").strip()
+    if client and role and client != role:
+        return f"{client}/{role}"
+    return client or role or "unspecified"
+
+
 @dataclass
 class MemoryFile:
     path: Path

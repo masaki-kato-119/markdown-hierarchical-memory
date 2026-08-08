@@ -1,6 +1,6 @@
 import pytest
 
-from mdmem import manager
+from mdmem import manager, models
 from mdmem.errors import ConflictError, NotFoundError, ValidationError
 
 
@@ -111,6 +111,82 @@ def test_update_metadata_conflict_on_stale_expected_updated(root):
     manager.update_metadata(root, "a", importance=0.9)
     with pytest.raises(ConflictError):
         manager.update_metadata(root, "a", importance=0.1, expected_updated=stale)
+
+
+def test_create_file_accepts_howto_dir(root):
+    # The store already contained a memory/howto/ file this validation rejected.
+    mf = manager.create_file(root, "a", "howto", "howto", "# A\n", "desc")
+    assert mf.path.parent.name == "howto"
+
+
+def test_split_file_extracts_several_sections_into_one_file(root):
+    manager.create_file(
+        root, "src", "reference", "reference",
+        "# Src\n\n## Keep\nk\n\n## Sound A\na\n\n## Other\no\n\n## Sound B\nb\n",
+        "desc",
+    )
+    source, new = manager.split_file(
+        root, "src", "sound", "reference", "reference", "sound notes",
+        sections_to_extract=["Sound A", "Sound B"],
+    )
+    assert "## Sound A" in new.body and "## Sound B" in new.body
+    assert "## Sound A" not in source.body and "## Sound B" not in source.body
+    assert "## Keep" in source.body and "## Other" in source.body
+
+
+def test_split_file_rejects_both_section_arguments(root):
+    manager.create_file(root, "src", "reference", "reference", "# S\n\n## A\na\n", "desc")
+    with pytest.raises(ValidationError):
+        manager.split_file(
+            root, "src", "new", "reference", "reference", "d",
+            section_to_extract="A", sections_to_extract=["A"],
+        )
+
+
+def test_split_file_names_the_missing_section(root):
+    manager.create_file(root, "src", "reference", "reference", "# S\n\n## A\na\n", "desc")
+    with pytest.raises(NotFoundError, match="ghost"):
+        manager.split_file(
+            root, "src", "new", "reference", "reference", "d",
+            sections_to_extract=["A", "ghost"],
+        )
+
+
+def test_create_file_with_parent_writes_both_sides(root):
+    # `parent` used to be recorded on the child only, which is the one-sided link
+    # §12 forbids -- reachable through an ordinary documented call.
+    manager.create_file(root, "a", "projects", "project", "# A\n", "desc a")
+    child = manager.create_file(
+        root, "b", "projects", "project", "# B\n", "desc b", parent=["a"]
+    )
+    assert child.fm["parent"] == ["a"]
+    assert "- [[b]]" in manager.require_by_id(root, "a").body
+
+
+def test_create_file_with_multiple_parents_links_each(root):
+    manager.create_file(root, "a", "projects", "project", "# A\n", "desc a")
+    manager.create_file(root, "b", "projects", "project", "# B\n", "desc b")
+    manager.create_file(
+        root, "c", "projects", "project", "# C\n", "desc c", parent=["a", "b"]
+    )
+    assert "- [[c]]" in manager.require_by_id(root, "a").body
+    assert "- [[c]]" in manager.require_by_id(root, "b").body
+
+
+def test_create_file_rejects_unknown_parent(root):
+    with pytest.raises(NotFoundError):
+        manager.create_file(
+            root, "b", "projects", "project", "# B\n", "desc b", parent=["ghost"]
+        )
+
+
+def test_create_file_leaves_nothing_behind_when_parent_is_unknown(root):
+    with pytest.raises(NotFoundError):
+        manager.create_file(
+            root, "b", "projects", "project", "# B\n", "desc b", parent=["ghost"]
+        )
+    assert not (root / "projects" / "b.md").exists()
+    assert manager.find_by_id(root, "b") is None
 
 
 def test_link_files_is_bidirectional(root):
@@ -306,3 +382,35 @@ def test_check_archive_candidates_respects_pinned(root):
     write_file(mf.path, mf.fm, mf.body)
     candidates = manager.check_archive_candidates(root)
     assert candidates == []
+
+
+def _age(root, id, last_access):
+    from mdmem.store import write_file
+
+    mf = manager.require_by_id(root, id)
+    mf.fm["last_access"] = last_access
+    write_file(mf.path, mf.fm, mf.body)
+
+
+def test_check_archive_candidates_days_is_adjustable(root):
+    # The 180-day default cannot fire in a store younger than 180 days, which left
+    # no way to see whether the rule behaves as intended before the day it matters.
+    manager.create_file(root, "a", "projects", "project", "x", "desc")
+    _age(root, "a", "2026-01-01")
+    assert manager.check_archive_candidates(root, days=10000) == []
+    assert [c["id"] for c in manager.check_archive_candidates(root, days=1)] == ["a"]
+
+
+def test_check_archive_candidates_defaults_to_the_spec_window(root):
+    manager.create_file(root, "a", "projects", "project", "x", "desc")
+    _age(root, "a", models.today_date())
+    assert manager.check_archive_candidates(root) == []
+
+
+def test_days_does_not_override_the_access_count_condition(root):
+    # §13 is a conjunction: a well-read file is not a candidate however old it is.
+    manager.create_file(root, "a", "projects", "project", "x", "desc")
+    for _ in range(3):
+        manager.get_and_touch(root, "a")
+    _age(root, "a", "2020-01-01")
+    assert manager.check_archive_candidates(root, days=0) == []

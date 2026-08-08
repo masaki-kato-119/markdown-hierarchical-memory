@@ -68,9 +68,40 @@ def create_file(
     path = root / dir / f"{id}.md"
     if path.exists():
         raise ValidationError(f"file already exists at {path}")
+
+    # `parent` used to be written straight into front matter and nothing else, so
+    # this — a normal, documented call — produced exactly the one-sided link §12
+    # forbids and that link_files goes out of its way to self-check against. An
+    # audit of the live store found six of them. The parent side is now written
+    # here too, under the same all-or-nothing discipline as link_files. Parents are
+    # resolved before anything is written so a bad id fails cleanly instead of
+    # leaving a new file pointing at nothing.
+    parent_files = [require_by_id(root, p) for p in (parent or [])]
+
     fm = models.new_frontmatter(id, type, tags=tags, importance=importance, pinned=pinned, parent=parent)
     write_file(path, fm, content)
-    index_mod.upsert_entry(root, id, description, tags=tags or [])
+    snapshots = [(pmf.path, pmf.path.read_text(encoding="utf-8")) for pmf in parent_files]
+    try:
+        for pmf in parent_files:
+            new_parent_fm = dict(pmf.fm)
+            new_parent_fm["updated"] = models.now_stamp()
+            write_file(pmf.path, new_parent_fm, _ensure_link_line(pmf.body, id, None))
+        created = load_file(path)
+        for pmf in parent_files:
+            ok_forward = id in extract_structural_links(load_file(pmf.path).body)
+            ok_backward = pmf.id in (created.fm.get("parent") or [])
+            if not (ok_forward and ok_backward):
+                raise RuntimeError(
+                    f"bidirectional link self-check failed for {pmf.id} -> {id} "
+                    f"(forward={ok_forward}, backward={ok_backward}); spec §12 forbids a one-sided link"
+                )
+        index_mod.upsert_entry(root, id, description, tags=tags or [])
+    except Exception:
+        for parent_path, original_text in snapshots:
+            parent_path.write_text(original_text, encoding="utf-8", newline="\n")
+        path.unlink(missing_ok=True)
+        raise
+
     if _log:
         log_mod.append(root, "create", [id], rationale or f"created {id} ({type})", actor)
     return load_file(path)
@@ -318,14 +349,33 @@ def split_file(
     expected_updated: str | None = None,
     actor: str = "unspecified",
     rationale: str = "",
+    sections_to_extract: list[str] | None = None,
 ) -> tuple[MemoryFile, MemoryFile]:
     """spec §9/§10 split action: extract content into a new file, remove it from
-    the source (if a section name is given), and wire up the bidirectional link
+    the source (if section names are given), and wire up the bidirectional link
     (§12) as part of the same operation."""
     source_mf = require_by_id(root, source_id)
     check_version(source_mf, expected_updated)
 
-    if section_to_extract:
+    if sections_to_extract:
+        if section_to_extract:
+            raise ValidationError(
+                "pass either section_to_extract or sections_to_extract, not both"
+            )
+        result = sections.extract_sections(source_mf.body, sections_to_extract)
+        if result is None:
+            headings = sections.list_headings(source_mf.body)
+            missing = [
+                h for h in sections_to_extract
+                if sections.find_section_bounds(source_mf.body, h) is None
+            ]
+            raise NotFoundError(
+                f"sections {missing} not found in '{source_id}'. Existing headings: {headings}"
+            )
+        content, remaining_body = result
+        if extracted_content:
+            content = extracted_content
+    elif section_to_extract:
         result = sections.extract_section(source_mf.body, section_to_extract)
         if result is None:
             headings = sections.list_headings(source_mf.body)
@@ -443,14 +493,16 @@ def move_to_archive(
     return load_file(archive_path)
 
 
-def check_archive_candidates(root: Path) -> list[dict]:
+def check_archive_candidates(
+    root: Path, days: int = models.FORGET_AFTER_DAYS
+) -> list[dict]:
     """spec §13/§11: report candidates only. Archiving still requires an explicit
     follow-up call (move_to_archive / summarize_and_archive) — never auto-executed."""
     candidates = []
     for mf in load_all(root):
         if mf.is_archived:
             continue
-        if models.is_archive_candidate(mf.fm):
+        if models.is_archive_candidate(mf.fm, days=days):
             candidates.append(
                 {
                     "id": mf.id,
