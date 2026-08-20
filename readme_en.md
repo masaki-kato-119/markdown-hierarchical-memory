@@ -1,6 +1,6 @@
 # markdown-hierarchical-memory
 
-An implementation of [markdown-hierarchical-memory-spec.md](markdown-hierarchical-memory-spec.md) v1.
+An implementation of [markdown-hierarchical-memory-spec.md](markdown-hierarchical-memory-spec_en.md) v1.
 
 - **MCP server** (`src/mdmem/`): The mechanical execution layer providing file read/write, frontmatter management, a wikilink graph, keyword search with graph expansion, optimistic concurrency control (§16), bidirectional link consistency checks (§12), and a change log (§10/§17). Semantic judgments such as cohesion and importance (§9) are not implemented.
 - **Claude Code subagent** ([.claude/agents/memory-manager.md](.claude/agents/memory-manager.md)): The Manager Agent defined in §10 of the specification. This is the component that makes semantic judgments by calling MCP tools.
